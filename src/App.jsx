@@ -18,16 +18,18 @@ export default function VisualizadorLAS() {
   const [curveFillColors, setCurveFillColors] = useState({});
   const [curveReversed, setCurveReversed] = useState({});
   const [curveFilled, setCurveFilled] = useState({});
+  const [curveScale, setCurveScale] = useState({});
   const [error, setError] = useState("");
   const [activeFileId, setActiveFileId] = useState(null);
   const [selectedWellIds, setSelectedWellIds] = useState([]);
   const [sidebarWellId, setSidebarWellId] = useState(null);
-  const [colWidth, setColWidth] = useState(300);
+  const [colWidth, setColWidth] = useState(230);
   const [activeTab, setActiveTab] = useState("grafico"); // "grafico" | "tabela"
   const [wellCoords, setWellCoords] = useState({});
   const [pinningWellId, setPinningWellId] = useState(null);
   const [darkMode, setDarkMode] = useState(false); // Default to Light mode to match reference image
   const [showSidebar, setShowSidebar] = useState(false);
+  const [maxCurvesLimit, setMaxCurvesLimit] = useState(6);
 
   const handleToggleWellSelection = useCallback((id) => {
     setSelectedWellIds(prev => {
@@ -87,18 +89,43 @@ export default function VisualizadorLAS() {
     });
   }, [files]);
 
-  // Inicializar tracks padrão se o gráfico estiver vazio e houver arquivos carregados
+  // Sincronizar e carregar automaticamente 3 curvas de cada poço selecionado
   useEffect(() => {
-    if (files.length > 0 && tracks.length === 0) {
-      const file = files[files.length - 1]; // pega o último arquivo carregado para inicializar as tracks dele
-      const defaultCurves = file.parsed.curves.slice(1, 4).map(c => c.mnemonic);
-      const newTracks = defaultCurves.map(m => ({
-        id: crypto.randomUUID(),
-        curves: [`${m}__${file.id}`]
-      }));
-      setTracks(newTracks);
-    }
-  }, [files, tracks.length]);
+    if (files.length === 0 || selectedWellIds.length === 0) return;
+
+    setTracks(prev => {
+      let changed = false;
+      const next = JSON.parse(JSON.stringify(prev));
+
+      selectedWellIds.forEach(wellId => {
+        const file = files.find(f => f.id === wellId);
+        if (!file) return;
+
+        // Pegar as 3 primeiras curvas (excluindo a profundidade)
+        const defaultCurves = file.parsed.curves.slice(1, 4).map(c => c.mnemonic);
+
+        defaultCurves.forEach(m => {
+          const key = `${m}__${wellId}`;
+
+          // Verificar se a curva já está em alguma track
+          const alreadyExists = next.some(t => t.curves.includes(key));
+          if (alreadyExists) return;
+
+          next.push({
+            id: crypto.randomUUID(),
+            curves: [key]
+          });
+          changed = true;
+
+          // Garantir que as cores padrão estejam configuradas
+          setCurveColors(colors => colors[key] ? colors : { ...colors, [key]: defaultHex(m) });
+          setCurveFillColors(fills => fills[key] ? fills : { ...fills, [key]: defaultHex(m) });
+        });
+      });
+
+      return changed ? next : prev;
+    });
+  }, [selectedWellIds, files]);
 
   const selectedCurves = useMemo(() => tracks.flatMap(t => t.curves), [tracks]);
 
@@ -185,14 +212,28 @@ export default function VisualizadorLAS() {
     });
   }, []);
 
-  const moveCurve = useCallback((trackIndex, curveIndex, direction) => {
+  const moveCurve = useCallback((wellId, trackIndex, curveIndex, direction) => {
     setTracks(prev => {
+      const wellTrackIndices = [];
+      prev.forEach((track, idx) => {
+        if (track.curves.some(key => key.endsWith(`__${wellId}`))) {
+          wellTrackIndices.push(idx);
+        }
+      });
+
+      const targetWellTrackIndex = trackIndex + direction;
+      if (targetWellTrackIndex < 0 || targetWellTrackIndex >= wellTrackIndices.length) return prev;
+
+      const sourceGlobalIdx = wellTrackIndices[trackIndex];
+      const targetGlobalIdx = wellTrackIndices[targetWellTrackIndex];
+
       const newTracks = JSON.parse(JSON.stringify(prev));
-      const targetTrackIndex = trackIndex + direction;
-      if (targetTrackIndex < 0 || targetTrackIndex >= newTracks.length) return prev;
-      const curveKey = newTracks[trackIndex].curves[curveIndex];
-      newTracks[trackIndex].curves.splice(curveIndex, 1);
-      newTracks[targetTrackIndex].curves.push(curveKey);
+      const wellCurvesInSource = newTracks[sourceGlobalIdx].curves.filter(key => key.endsWith(`__${wellId}`));
+      const curveKey = wellCurvesInSource[curveIndex];
+
+      newTracks[sourceGlobalIdx].curves = newTracks[sourceGlobalIdx].curves.filter(c => c !== curveKey);
+      newTracks[targetGlobalIdx].curves.push(curveKey);
+
       return newTracks.filter(t => t.curves.length > 0);
     });
   }, []);
@@ -247,6 +288,7 @@ export default function VisualizadorLAS() {
     setTracks(prev => prev.map(t => ({ ...t, curves: t.curves.filter(k => !k.endsWith(`__${id}`)) })).filter(t => t.curves.length > 0));
     setCurveColors(prev => { const n = { ...prev }; Object.keys(n).forEach(k => { if (k.endsWith(`__${id}`)) delete n[k]; }); return n; });
     setCurveFillColors(prev => { const n = { ...prev }; Object.keys(n).forEach(k => { if (k.endsWith(`__${id}`)) delete n[k]; }); return n; });
+    setCurveScale(prev => { const n = { ...prev }; Object.keys(n).forEach(k => { if (k.endsWith(`__${id}`)) delete n[k]; }); return n; });
     resetZoom();
   }, [activeFileId, resetZoom]);
 
@@ -365,64 +407,132 @@ export default function VisualizadorLAS() {
     alert("Substituição em lote concluída com sucesso!");
   }, [activeFile]);
 
-  const trackDataWithMeta = useMemo(() => {
-    return tracks.map(track => {
-      const metas = track.curves.map(key => {
-        const [mnemonic, fileId] = key.split("__");
-        if (!selectedWellIds.includes(fileId)) return null;
-        const file = files.find(f => f.id === fileId);
-        if (!file) return null;
+  const wellsData = useMemo(() => {
+    return selectedWellIds.map(wellId => {
+      const file = files.find(f => f.id === wellId);
+      if (!file) return null;
 
-        const curveInfo = file.parsed.curves.find(c => c.mnemonic === mnemonic);
+      // 1. Pre-filter tracks that contain curves for this well to avoid redundant evaluation
+      const wellTracks = tracks
+        .filter(track => track.curves.some(key => key.endsWith(`__${wellId}`)))
+        .map(track => {
+          const metas = track.curves
+            .filter(key => key.endsWith(`__${wellId}`))
+            .map(key => {
+              const mnemonic = key.split("__")[0];
+              const curveInfo = file.parsed.curves.find(c => c.mnemonic === mnemonic);
 
-        const rawDepths = [];
-        const rawValues = [];
-        file.parsed.data.forEach(r => {
-          const v = r[mnemonic];
-          const d = r[file.depthCurve];
-          if (typeof v === "number" && !isNaN(v) && v !== file.nullValue &&
-            typeof d === "number" && !isNaN(d) && d !== file.nullValue) {
-            rawValues.push(v);
-            rawDepths.push(d);
+              // 2. Compute stats in a single pass without copying/allocating arrays
+              let minVal = Infinity;
+              let maxVal = -Infinity;
+              let minDepth = Infinity;
+              let maxDepth = -Infinity;
+              let hasValid = false;
+
+              const data = file.parsed.data;
+              const n = data.length;
+              const nullValue = file.nullValue;
+              const depthCurve = file.depthCurve;
+
+              for (let idx = 0; idx < n; idx++) {
+                const r = data[idx];
+                const v = r[mnemonic];
+                const d = r[depthCurve];
+                if (typeof v === "number" && !isNaN(v) && v !== nullValue &&
+                  typeof d === "number" && !isNaN(d) && d !== nullValue) {
+                  if (v < minVal) minVal = v;
+                  if (v > maxVal) maxVal = v;
+                  if (d < minDepth) minDepth = d;
+                  if (d > maxDepth) maxDepth = d;
+                  hasValid = true;
+                }
+              }
+
+              const stats = hasValid ? {
+                min: minVal,
+                max: maxVal,
+                minDepth,
+                maxDepth
+              } : null;
+
+              return {
+                key,
+                mnemonic,
+                fileId: wellId,
+                file,
+                fileName: file.name,
+                curveInfo,
+                stats,
+                color: getCurveColor(key),
+                fillColor: getCurveFillColor(key)
+              };
+            })
+            .filter(Boolean);
+
+          if (metas.length === 0) return null;
+
+          // 3. Downsample data inline to at most 2,000 points during data mapping
+          let mergedData = [];
+          const data = file.parsed.data;
+          const n = data.length;
+          const MAX_POINTS = 2000;
+          const step = n > MAX_POINTS ? Math.ceil(n / MAX_POINTS) : 1;
+
+          if (metas.length === 1) {
+            const meta = metas[0];
+            const mnemonic = meta.mnemonic;
+            const depthCurve = meta.file.depthCurve;
+            const nullValue = meta.file.nullValue;
+            const key = meta.key;
+
+            for (let idx = 0; idx < n; idx += step) {
+              const r = data[idx];
+              if (!r) continue;
+              const d = r[depthCurve];
+              const val = r[mnemonic];
+              if (typeof d === "number" && !isNaN(d) && d !== nullValue &&
+                typeof val === "number" && !isNaN(val) && val !== nullValue) {
+                mergedData.push({ depth: d, [key]: val });
+              }
+            }
+          } else {
+            // For multiple curves inside the same track, do inline downsampling as well
+            const dataMap = new Map();
+            metas.forEach(meta => {
+              const mnemonic = meta.mnemonic;
+              const depthCurve = meta.file.depthCurve;
+              const nullValue = meta.file.nullValue;
+              const key = meta.key;
+
+              for (let idx = 0; idx < n; idx += step) {
+                const r = data[idx];
+                if (!r) continue;
+                const d = r[depthCurve];
+                const val = r[mnemonic];
+                if (typeof d === "number" && !isNaN(d) && d !== nullValue &&
+                  typeof val === "number" && !isNaN(val) && val !== nullValue) {
+                  if (!dataMap.has(d)) dataMap.set(d, { depth: d });
+                  dataMap.get(d)[key] = val;
+                }
+              }
+            });
+            mergedData = Array.from(dataMap.values()).sort((a, b) => a.depth - b.depth);
           }
-        });
 
-        const stats = rawValues.length > 0 ? {
-          min: Math.min(...rawValues),
-          max: Math.max(...rawValues),
-          minDepth: Math.min(...rawDepths),
-          maxDepth: Math.max(...rawDepths)
-        } : null;
+          return { ...track, metas, mergedData };
+        }).filter(Boolean);
 
-        return { key, mnemonic, fileId, file, fileName: file.name, curveInfo, stats, color: getCurveColor(key), fillColor: getCurveFillColor(key) };
-      }).filter(Boolean);
-
-      const dataMap = new Map();
-      metas.forEach(meta => {
-        meta.file.parsed.data.forEach(row => {
-          const d = row[meta.file.depthCurve];
-          const val = row[meta.mnemonic];
-          if (typeof d === "number" && !isNaN(d) && d !== meta.file.nullValue &&
-            typeof val === "number" && !isNaN(val) && val !== meta.file.nullValue) {
-            if (!dataMap.has(d)) dataMap.set(d, { depth: d });
-            dataMap.get(d)[meta.key] = val;
-          }
-        });
-      });
-
-      let mergedData = Array.from(dataMap.values()).sort((a, b) => a.depth - b.depth);
-
-      const MAX_POINTS = 2000;
-      if (mergedData.length > MAX_POINTS) {
-        const step = Math.ceil(mergedData.length / MAX_POINTS);
-        mergedData = mergedData.filter((_, i) => i % step === 0);
-      }
-
-      return { ...track, metas, mergedData };
-    }).filter(t => t.metas.length > 0);
+      return {
+        wellId,
+        wellName: file.parsed.metadata?.well?.WELL?.value || file.name.replace(/\.las$/i, ""),
+        tracks: wellTracks
+      };
+    }).filter(Boolean).filter(w => w.tracks.length > 0);
   }, [tracks, files, getCurveColor, getCurveFillColor, selectedWellIds]);
 
-  const selectedCurvesMeta = useMemo(() => trackDataWithMeta.flatMap(t => t.metas), [trackDataWithMeta]);
+  const selectedCurvesMeta = useMemo(() => {
+    return wellsData.flatMap(w => w.tracks.flatMap(t => t.metas));
+  }, [wellsData]);
 
   const activeWellsTitle = useMemo(() => {
     const selectedFiles = files.filter(f => selectedWellIds.includes(f.id));
@@ -532,7 +642,7 @@ export default function VisualizadorLAS() {
                 colWidth={colWidth}
                 setColWidth={setColWidth}
                 selectedCurves={selectedCurves}
-                trackDataWithMeta={trackDataWithMeta}
+                wellsData={wellsData}
                 moveCurve={moveCurve}
                 curveReversed={curveReversed}
                 setCurveReversed={setCurveReversed}
@@ -542,6 +652,8 @@ export default function VisualizadorLAS() {
                 setCurveColors={setCurveColors}
                 curveFillColors={curveFillColors}
                 setCurveFillColors={setCurveFillColors}
+                curveScale={curveScale}
+                setCurveScale={setCurveScale}
                 activeDomain={activeDomain}
                 containerRef={containerRef}
                 onMouseDown={onMouseDown}
@@ -551,10 +663,14 @@ export default function VisualizadorLAS() {
                 selectEnd={selectEnd}
                 files={files}
                 darkMode={darkMode}
+                maxCurvesLimit={maxCurvesLimit}
+                setMaxCurvesLimit={setMaxCurvesLimit}
               />
             ) : (
               <TabularEditor
                 activeFile={activeFile}
+                files={files}
+                setActiveFileId={setActiveFileId}
                 onSaveEdit={handleSaveEdit}
                 onBulkReplace={handleBulkReplace}
               />

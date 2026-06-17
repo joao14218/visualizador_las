@@ -3,6 +3,8 @@ import { Search, X } from "lucide-react";
 
 export default function TabularEditor({
   activeFile,
+  files,
+  setActiveFileId,
   onSaveEdit,
   onBulkReplace,
 }) {
@@ -112,6 +114,24 @@ export default function TabularEditor({
               Edite valores clicando duas vezes nas células. As alterações atualizam os gráficos instantaneamente.
             </p>
           </div>
+
+          {/* Well Selector */}
+          {files && files.length > 1 && setActiveFileId && (
+            <div className="flex items-center gap-2">
+              <label className="text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider whitespace-nowrap">Poço:</label>
+              <select
+                value={activeFile.id}
+                onChange={e => setActiveFileId(e.target.value)}
+                className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 px-3 py-1.5 text-xs text-slate-800 dark:text-slate-200 font-bold outline-none cursor-pointer min-w-[140px]"
+              >
+                {files.map(f => (
+                  <option key={f.id} value={f.id}>
+                    {f.parsed.metadata?.well?.WELL?.value || f.name.replace(/\.las$/i, "")}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
         </div>
 
         {/* Controls row */}
