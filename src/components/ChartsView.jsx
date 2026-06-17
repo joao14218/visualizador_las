@@ -124,6 +124,99 @@ function useIntersectionObserver() {
   return [ref, isIntersecting];
 }
 
+/**
+ * Generates logarithmic axis configuration following the API Log Grid standard.
+ * For resistivity-type curves: fixed 4-decade domain [0.2, 2000].
+ * For other curves: dynamically calculates decades from data range.
+ * Returns { domain, ticks, tickFormatter, majorTicks } where:
+ *  - ticks: every integer 1-9 within each decade (produces the compacting grid lines)
+ *  - tickFormatter: only shows labels at major decade boundaries to avoid clutter
+ *  - majorTicks: Set of decade boundary values for drawing strong grid lines
+ */
+function getLogAxisProps(meta) {
+  const minVal = meta.stats?.min > 0 ? meta.stats.min : 0.1;
+  const maxVal = meta.stats?.max > 0 ? meta.stats.max : 1000;
+
+  const mnemonic = (meta.mnemonic || "").toUpperCase();
+  const isResistivity = /^(IL|LL|RT|RX|RES|SFL|ILD|ILM|LLD|LLS|MSFL|SFLU|RFOC|RILD|RILM)/i.test(mnemonic);
+
+  let domain;
+  let ticks = [];
+  let labeledTicks = new Set();
+  let majorTicks = new Set();
+
+  if (isResistivity) {
+    // Standard 4-decade resistivity grid: 0.2 to 2000
+    domain = [0.2, 2000];
+
+    // Fractional decade: 0.2 to 1.0
+    for (let i = 2; i <= 10; i++) ticks.push(Number((i * 0.1).toFixed(1)));
+    // Decade 1→10
+    for (let i = 1; i <= 10; i++) ticks.push(i);
+    // Decade 10→100
+    for (let i = 1; i <= 10; i++) ticks.push(i * 10);
+    // Decade 100→1000
+    for (let i = 1; i <= 10; i++) ticks.push(i * 100);
+    // Stretch to 2000
+    ticks.push(2000);
+
+    labeledTicks = new Set([0.2, 1, 10, 100, 1000, 2000]);
+    majorTicks = new Set([0.2, 1, 10, 100, 1000, 2000]);
+  } else {
+    // Dynamic decades based on data range
+    const powStart = Math.floor(Math.log10(minVal));
+    const powEnd = Math.ceil(Math.log10(maxVal));
+    const startDecade = Math.pow(10, powStart);
+    const endDecade = Math.pow(10, powEnd);
+    domain = [startDecade, endDecade];
+
+    const numDecades = powEnd - powStart;
+
+    if (numDecades <= 1) {
+      // Narrow range within a single decade — use finer subdivisions
+      const base = Math.pow(10, powStart);
+      for (let i = 1; i <= 10; i++) {
+        ticks.push(base * i);
+        labeledTicks.add(base * i);
+      }
+      majorTicks.add(base);
+      majorTicks.add(base * 10);
+    } else {
+      // Multiple decades: generate 1-9 per decade (creates the compacting grid effect)
+      for (let p = powStart; p < powEnd; p++) {
+        const base = Math.pow(10, p);
+        for (let i = 1; i <= 9; i++) ticks.push(base * i);
+      }
+      ticks.push(endDecade);
+
+      // Label only decade boundaries + optional 2 and 5 for readability
+      for (let p = powStart; p <= powEnd; p++) {
+        const base = Math.pow(10, p);
+        labeledTicks.add(base);
+        majorTicks.add(base);
+        if (numDecades <= 3) {
+          labeledTicks.add(base * 2);
+          labeledTicks.add(base * 5);
+        }
+      }
+    }
+  }
+
+  ticks = Array.from(new Set(ticks)).sort((a, b) => a - b);
+
+  const tickFormatter = (val) => {
+    const match = Array.from(labeledTicks).find(t => Math.abs(t - val) < val * 0.001);
+    if (match !== undefined) {
+      if (match >= 1000) return match.toFixed(0);
+      if (match >= 1) return Number(match.toFixed(2)).toString();
+      return match.toString();
+    }
+    return "";
+  };
+
+  return { domain, ticks, tickFormatter, majorTicks };
+}
+
 const TrackChartWrapper = ({
   track,
   trackIndex,
@@ -152,6 +245,11 @@ const TrackChartWrapper = ({
   moveCurve,
 }) => {
   const [ref, inView] = useIntersectionObserver();
+
+  // Check if the primary (first) curve in this track is in log mode
+  const primaryMeta = track.metas[0];
+  const primaryIsLog = primaryMeta && curveScale?.[primaryMeta.key] === "log";
+  const primaryLogProps = primaryIsLog ? getLogAxisProps(primaryMeta) : null;
 
   const adjustedData = track.mergedData.map(row => {
     const newRow = { ...row };
@@ -183,11 +281,16 @@ const TrackChartWrapper = ({
         >
           <ResponsiveContainer width="100%" height="100%">
             <AreaChart data={adjustedData} layout="vertical" margin={{ top: 10 + extraMarginTop, right: 20, left: 10, bottom: 20 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,.15)" />
+              <CartesianGrid
+                strokeDasharray="3 3"
+                stroke="rgba(148,163,184,.15)"
+                vertical={!primaryIsLog}
+              />
 
               {track.metas.map((meta, i) => {
                 const isReversed = !!curveReversed[meta.key];
                 const isLog = curveScale?.[meta.key] === "log";
+                const logProps = isLog ? getLogAxisProps(meta) : null;
                 return (
                   <XAxis
                     key={meta.key}
@@ -197,8 +300,10 @@ const TrackChartWrapper = ({
                     orientation="top"
                     stroke={meta.color}
                     tick={{ fontSize: 9, fill: meta.color }}
-                    domain={["auto", "auto"]}
+                    domain={isLog ? logProps.domain : ["auto", "auto"]}
                     scale={isLog ? "log" : "auto"}
+                    ticks={isLog ? logProps.ticks : undefined}
+                    tickFormatter={isLog ? logProps.tickFormatter : undefined}
                     reversed={isReversed}
                     allowDataOverflow={true}
                     axisLine={false}
@@ -257,7 +362,7 @@ const TrackChartWrapper = ({
 
                 const opacity = fillType === "none" ? 0 : 0.15;
                 const baseVal = fillDir === "right" ? "dataMax" : "dataMin";
-                
+
                 const areas = [
                   <Area
                     key={`${meta.key}-solid`}
@@ -300,6 +405,23 @@ const TrackChartWrapper = ({
                 }
 
                 return areas;
+              })}
+
+              {/* Logarithmic Grid Lines — drawn manually with differentiated opacity */}
+              {primaryIsLog && primaryLogProps && primaryLogProps.ticks.map(tickVal => {
+                const isMajor = primaryLogProps.majorTicks.has(tickVal);
+                return (
+                  <ReferenceLine
+                    key={`log-grid-${tickVal}`}
+                    xAxisId={primaryMeta.key}
+                    x={tickVal}
+                    yAxisId={0}
+                    stroke={darkMode ? "rgba(148,163,184,.35)" : "rgba(100,116,139,.3)"}
+                    strokeOpacity={isMajor ? 1 : 0.35}
+                    strokeWidth={isMajor ? 1 : 0.5}
+                    strokeDasharray={isMajor ? "none" : "none"}
+                  />
+                );
               })}
 
               {/* Ref Lines */}
@@ -385,7 +507,7 @@ export default function ChartsView({
             <circle cx="4" cy="12" r="0.8" fill="rgba(255, 255, 255, 0.18)" />
             <circle cx="8" cy="8" r="1" fill="rgba(255, 255, 255, 0.24)" />
           </pattern>
-          
+
           {/* Tracejado (Dashed) */}
           <pattern id="pattern-dashed-light" width="14" height="8" patternUnits="userSpaceOnUse">
             <line x1="0" y1="4" x2="14" y2="4" stroke="rgba(107, 114, 128, 0.75)" strokeWidth="1" strokeDasharray="5,2" />
