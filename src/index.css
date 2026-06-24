@@ -3,8 +3,8 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 @theme {
-  --color-white: #f4f5f8;
-  --color-slate-50: #e9ecf0;
+  --color-white: #e1e4e9;
+  --color-slate-50: #d2d5dc;
 }
 
 html,

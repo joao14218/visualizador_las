@@ -135,17 +135,20 @@ function useIntersectionObserver() {
  */
 function getLogAxisProps(meta) {
   const minVal = meta.stats?.min > 0 ? meta.stats.min : 0.1;
-  const maxVal = meta.stats?.max > 0 ? meta.stats.max : 1000;
+  const rawMaxVal = meta.stats?.max > 0 ? meta.stats.max : 1000;
 
   const mnemonic = (meta.mnemonic || "").toUpperCase();
   const isResistivity = /^(IL|LL|RT|RX|RES|SFL|ILD|ILM|LLD|LLS|MSFL|SFLU|RFOC|RILD|RILM)/i.test(mnemonic);
+  
+  // Use standard [0.2, 2000] scale only for resistivity curves that actually reach high values near 2000
+  const isStandardResistivity = isResistivity && rawMaxVal >= 1500;
 
   let domain;
   let ticks = [];
   let labeledTicks = new Set();
   let majorTicks = new Set();
 
-  if (isResistivity) {
+  if (isStandardResistivity) {
     // Standard 4-decade resistivity grid: 0.2 to 2000
     domain = [0.2, 2000];
 
@@ -160,45 +163,98 @@ function getLogAxisProps(meta) {
     // Stretch to 2000
     ticks.push(2000);
 
-    labeledTicks = new Set([0.2, 1, 10, 100, 1000, 2000]);
-    majorTicks = new Set([0.2, 1, 10, 100, 1000, 2000]);
+    const standardLabeled = [0.2, 1, 10, 100, 1000, 2000];
+    standardLabeled.forEach(t => {
+      labeledTicks.add(t);
+      majorTicks.add(t);
+    });
   } else {
-    // Dynamic decades based on data range
+    // Dynamic decade candidate generation for other curves
     const powStart = Math.floor(Math.log10(minVal));
-    const powEnd = Math.ceil(Math.log10(maxVal));
-    const startDecade = Math.pow(10, powStart);
-    const endDecade = Math.pow(10, powEnd);
-    domain = [startDecade, endDecade];
+    let startDecade = Math.pow(10, powStart);
 
-    const numDecades = powEnd - powStart;
+    // Round rawMaxVal to a nice clean number ending in 0/5
+    let maxVal = rawMaxVal;
+    if (rawMaxVal > 0) {
+      const log = Math.log10(rawMaxVal);
+      const pow = Math.floor(log);
+      const fraction = rawMaxVal / Math.pow(10, pow);
+      const step = fraction <= 2 ? 0.2 : 0.5;
+      const roundedFraction = Math.ceil(fraction / step) * step;
+      maxVal = Number((roundedFraction * Math.pow(10, pow)).toFixed(6));
+    }
+
+    // Prevent degenerate domain if min/max are too close
+    if (maxVal <= startDecade) {
+      startDecade = startDecade / 10;
+    }
+
+    domain = [startDecade, maxVal];
+
+    // Generate ticks from startDecade's power up to maxVal's power
+    const logStart = Math.floor(Math.log10(startDecade));
+    const logEnd = Math.ceil(Math.log10(maxVal));
+    const endDecade = Math.pow(10, logEnd);
+
+    const numDecades = logEnd - logStart;
+
+    let candidateTicks = [];
+    let candidateLabeled = new Set();
+    let candidateMajor = new Set();
 
     if (numDecades <= 1) {
-      // Narrow range within a single decade — use finer subdivisions
-      const base = Math.pow(10, powStart);
+      const base = Math.pow(10, logStart);
       for (let i = 1; i <= 10; i++) {
-        ticks.push(base * i);
-        labeledTicks.add(base * i);
+        candidateTicks.push(base * i);
+        candidateLabeled.add(base * i);
       }
-      majorTicks.add(base);
-      majorTicks.add(base * 10);
+      candidateMajor.add(base);
+      candidateMajor.add(base * 10);
     } else {
-      // Multiple decades: generate 1-9 per decade (creates the compacting grid effect)
-      for (let p = powStart; p < powEnd; p++) {
+      for (let p = logStart; p < logEnd; p++) {
         const base = Math.pow(10, p);
-        for (let i = 1; i <= 9; i++) ticks.push(base * i);
+        for (let i = 1; i <= 9; i++) candidateTicks.push(base * i);
       }
-      ticks.push(endDecade);
+      candidateTicks.push(endDecade);
 
-      // Label only decade boundaries + optional 2 and 5 for readability
-      for (let p = powStart; p <= powEnd; p++) {
+      for (let p = logStart; p <= logEnd; p++) {
         const base = Math.pow(10, p);
-        labeledTicks.add(base);
-        majorTicks.add(base);
+        candidateLabeled.add(base);
+        candidateMajor.add(base);
         if (numDecades <= 3) {
-          labeledTicks.add(base * 2);
-          labeledTicks.add(base * 5);
+          candidateLabeled.add(base * 2);
+          candidateLabeled.add(base * 5);
         }
       }
+    }
+
+    candidateTicks = Array.from(new Set(candidateTicks)).sort((a, b) => a - b);
+
+    // Filter candidate ticks to the domain [startDecade, maxVal]
+    ticks = candidateTicks.filter(t => t >= startDecade && t <= maxVal);
+
+    candidateLabeled.forEach(t => {
+      if (t >= startDecade && t <= maxVal) {
+        labeledTicks.add(t);
+      }
+    });
+
+    candidateMajor.forEach(t => {
+      if (t >= startDecade && t <= maxVal) {
+        majorTicks.add(t);
+      }
+    });
+
+    // Ensure the domain boundaries (startDecade and maxVal) are always in ticks and labeled
+    if (!ticks.includes(startDecade)) {
+      ticks.push(startDecade);
+      labeledTicks.add(startDecade);
+      majorTicks.add(startDecade);
+    }
+    if (!ticks.includes(maxVal)) {
+      ticks.push(maxVal);
+      labeledTicks.add(maxVal);
+      majorTicks.add(maxVal);
     }
   }
 
@@ -416,19 +472,32 @@ const TrackChartWrapper = ({
                     xAxisId={primaryMeta.key}
                     x={tickVal}
                     yAxisId={0}
-                    stroke={darkMode ? "rgba(148,163,184,.35)" : "rgba(100,116,139,.3)"}
-                    strokeOpacity={isMajor ? 1 : 0.35}
-                    strokeWidth={isMajor ? 1 : 0.5}
+                    stroke={darkMode ? "rgba(148, 163, 184, 0.7)" : "rgba(71, 85, 105, 0.7)"}
+                    strokeOpacity={isMajor ? 1.0 : 0.45}
+                    strokeWidth={isMajor ? 1.2 : 0.6}
                     strokeDasharray={isMajor ? "none" : "none"}
                   />
                 );
               })}
-
-              {/* Ref Lines */}
+              {/* Depth boundary reference lines (minDepth and maxDepth) */}
               {track.metas.map((meta, i) => meta.stats && (
                 <React.Fragment key={`refs-${meta.key}`}>
-                  <ReferenceLine y={meta.stats.minDepth} yAxisId={0} stroke={meta.color} strokeOpacity={0.4} strokeDasharray="3 3" />
-                  <ReferenceLine y={meta.stats.maxDepth} yAxisId={0} stroke={meta.color} strokeOpacity={0.4} strokeDasharray="3 3" />
+                  <ReferenceLine
+                    y={meta.stats.minDepth}
+                    yAxisId={0}
+                    stroke={darkMode ? "#94a3b8" : "#475569"}
+                    strokeOpacity={0.8}
+                    strokeWidth={1.5}
+                    strokeDasharray="4 4"
+                  />
+                  <ReferenceLine
+                    y={meta.stats.maxDepth}
+                    yAxisId={0}
+                    stroke={darkMode ? "#94a3b8" : "#475569"}
+                    strokeOpacity={0.8}
+                    strokeWidth={1.5}
+                    strokeDasharray="4 4"
+                  />
                 </React.Fragment>
               ))}
 
